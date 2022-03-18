@@ -10,6 +10,8 @@ use rusb::Direction;
 use rusb::TransferType;
 use rusb::UsbContext;
 use std::str;
+use tracing::debug;
+use tracing::error;
 
 const USBTMC_MSGID_DEV_DEP_MSG_OUT: u8 = 1;
 const USBTMC_MSGID_DEV_DEP_MSG_IN: u8 = 2;
@@ -102,7 +104,10 @@ impl Instrument {
                     .iter()
                     .take_while(|c| **c != b'\n' && **c != b'\r')
                     .count();
-
+                if line_size < 12{
+                    error!("Read less than 12 characters!");
+                    return Err(UsbtmcError::Exception);
+                }
                 let result = str::from_utf8(&buf[12..line_size]).unwrap().to_string();
 
                 if has_kernel_driver {
@@ -169,31 +174,57 @@ impl Instrument {
         let context = Context::new().unwrap();
         let devices = match context.devices() {
             Ok(list) => list,
-            Err(_) => return Err(UsbtmcError::Exception),
+            Err(_) => {
+                error!("Failed to open the USB context.");
+                return Err(UsbtmcError::Exception);
+            }
         };
-
+        let context = rusb::Context::new().unwrap();
+        match context.devices() {
+            Ok(list) => debug!(
+                "{:#?}",
+                list.iter()
+                    .map(|a| a.device_descriptor())
+                    .flatten()
+                    .collect::<Vec<DeviceDescriptor>>()
+            ),
+            Err(_) => error!("Failed to list USB devices!"),
+        }
         for device in devices.iter() {
             let device_desc = match device.device_descriptor() {
                 Ok(descriptor) => descriptor,
-                Err(_) => continue,
+                Err(_) => {
+                    debug!("Unable to get the device descriptor");
+                    continue},
             };
-
+            debug!("Checking: {:#04x}:{:#04x}", device_desc.vendor_id(), device_desc.product_id());
             if device_desc.vendor_id() == self.vid && device_desc.product_id() == self.pid {
-                if self.bus.is_some() && self.address.is_some() {
-                    if device.bus_number() == self.bus.unwrap() && device.address() == self.address.unwrap() {
+                debug!("Found a USB device matching wanted VID and PID.");
+                if let (Some(bus), Some(address)) = (self.bus, self.address) {
+                    debug!("Bus and Address both exist.");
+                    if device.bus_number() == bus && device.address() == address {
+                        debug!("Bus and Address match the wanted one.");
                         match device.open() {
                             Ok(handle) => return Ok((device, device_desc, handle)),
-                            Err(_) => continue,
+                            Err(e) => {
+                                debug!("Failed to open the device! {e}");
+                                continue
+                            },
                         }
                     }
                 } else {
+                    debug!("Bus and Address aren't present.");
                     match device.open() {
                         Ok(handle) => return Ok((device, device_desc, handle)),
-                        Err(_) => continue,
+                        Err(e) => {
+                            debug!("Failed to open the device! {e}");
+                            continue
+                        },
                     }
                 }
             }
         }
+        error!("Found no USB devices matching requirements.");
         return Err(UsbtmcError::Exception);
     }
 
