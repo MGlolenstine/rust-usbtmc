@@ -1,14 +1,12 @@
+#[cfg(feature = "rusb")]
 use crate::error::UsbtmcError;
 use crate::helper::UsbtmcResult;
 use byteorder::{ByteOrder, LittleEndian};
 use core::time::Duration;
-use rusb::Context;
-use rusb::Device;
-use rusb::DeviceDescriptor;
-use rusb::DeviceHandle;
-use rusb::Direction;
-use rusb::TransferType;
-use rusb::UsbContext;
+#[cfg(feature = "libusbk")]
+use libusbk::{Device, DeviceHandle};
+#[cfg(feature = "rusb")]
+use rusb::{Context, Device, DeviceDescriptor, DeviceHandle, Direction, TransferType, UsbContext};
 use std::str;
 
 const USBTMC_MSGID_DEV_DEP_MSG_OUT: u8 = 1;
@@ -22,6 +20,7 @@ pub struct Endpoint {
     pub address: u8,
 }
 
+#[derive(Debug)]
 pub struct Instrument {
     pub vid: u16,
     pub pid: u16,
@@ -30,6 +29,8 @@ pub struct Instrument {
     last_btag: u8,
     max_transfer_size: u32,
     timeout: Duration,
+    write_pipe_id: u8,
+    read_pipe_id: u8,
 }
 
 impl Instrument {
@@ -43,6 +44,8 @@ impl Instrument {
             last_btag: 0,
             max_transfer_size: 1024 * 1024,
             timeout: Duration::from_secs(1),
+            write_pipe_id: 2,
+            read_pipe_id: 130,
         }
     }
 
@@ -58,6 +61,8 @@ impl Instrument {
             last_btag: 0,
             max_transfer_size: 1024 * 1024,
             timeout: Duration::from_secs(1),
+            write_pipe_id: 2,
+            read_pipe_id: 130,
         }
     }
 
@@ -82,6 +87,7 @@ impl Instrument {
     }
 
     /// Read string from the instrument
+    #[cfg(feature = "rusb")]
     pub fn read_raw(&mut self) -> UsbtmcResult<String> {
         let (mut device, device_desc, mut handle) = self.open_device()?;
 
@@ -114,6 +120,73 @@ impl Instrument {
 
             None => return Err(UsbtmcError::BulkOut),
         }
+    }
+
+    #[cfg(feature = "libusbk")]
+    pub fn read_raw(&mut self) -> UsbtmcResult<String> {
+        use std::time::Instant;
+
+        let (_device, mut device_handle) = self.open_device()?;
+
+        let buf = &mut [0u8; 1024];
+        let instant = Instant::now();
+
+        loop {
+            let bytes_read = device_handle.read_pipe(self.read_pipe_id as u8, buf)?;
+            if bytes_read != 0 && !buf.iter().all(|&a| a == 0) {
+                dbg!(bytes_read);
+                break;
+            }
+            if Instant::now() - instant > self.timeout {
+                println!("Pipe {} was opened!", self.read_pipe_id);
+                break;
+            }
+        }
+
+        let line_size = buf
+            .iter()
+            .take_while(|c| **c != b'\n' && **c != b'\r')
+            .count();
+
+        let result = str::from_utf8(&buf[12..line_size]).unwrap().to_string();
+
+        Ok(result)
+    }
+
+    pub fn test_pipes(&mut self, data: &str) -> UsbtmcResult<String> {
+        // self.write_data(data.as_bytes(), true)?;
+        // while self.write_data(data.as_bytes(), true).is_err() {
+        //     let (new_val, overflowed) = self.write_pipe_id.overflowing_add(1);
+        //     self.write_pipe_id = new_val;
+        //     if overflowed {
+        //         break;
+        //     }
+        // }
+        // println!("Write pipe: {}", self.write_pipe_id);
+        self.read_pipe_id = 0;
+        loop {
+            let (new_val, overflowed) = self.read_pipe_id.overflowing_add(1);
+            self.read_pipe_id = new_val;
+            println!("Current read pipe: {new_val}; overflowed: {overflowed}");
+            if overflowed {
+                println!("Breaking due to an overflow");
+                break;
+            }
+            self.write_data(data.as_bytes(), true)?;
+            let res = self.read_raw();
+            if let Ok(res) = res {
+                if !res.replace("\0", "").is_empty() {
+                    println!("Breaking due to receiving an answer: {:?}", res);
+                    break;
+                }
+            }
+        }
+        println!("Read pipe: {}", self.read_pipe_id);
+        println!(
+            "Pipes: Write: {}; Read: {}",
+            self.write_pipe_id, self.read_pipe_id
+        );
+        Ok(String::new())
     }
 
     /// Send a message and wait for response
@@ -163,6 +236,7 @@ impl Instrument {
         buf
     }
 
+    #[cfg(feature = "rusb")]
     fn open_device(
         &self,
     ) -> UsbtmcResult<(Device<Context>, DeviceDescriptor, DeviceHandle<Context>)> {
@@ -171,25 +245,38 @@ impl Instrument {
             Ok(list) => list,
             Err(_) => return Err(UsbtmcError::Exception),
         };
-
+        dbg!(&devices.len());
+        println!("{:04x}:{:04x}", &self.vid, &self.pid);
         for device in devices.iter() {
+            dbg!(&device);
             let device_desc = match device.device_descriptor() {
                 Ok(descriptor) => descriptor,
-                Err(_) => continue,
+                Err(e) => {
+                    dbg!(e);
+                    continue;
+                }
             };
 
             if device_desc.vendor_id() == self.vid && device_desc.product_id() == self.pid {
                 if self.bus.is_some() && self.address.is_some() {
-                    if device.bus_number() == self.bus.unwrap() && device.address() == self.address.unwrap() {
+                    if device.bus_number() == self.bus.unwrap()
+                        && device.address() == self.address.unwrap()
+                    {
                         match device.open() {
                             Ok(handle) => return Ok((device, device_desc, handle)),
-                            Err(_) => continue,
+                            Err(e) => {
+                                dbg!(e);
+                                continue;
+                            }
                         }
                     }
                 } else {
                     match device.open() {
                         Ok(handle) => return Ok((device, device_desc, handle)),
-                        Err(_) => continue,
+                        Err(e) => {
+                            dbg!(e);
+                            continue;
+                        }
                     }
                 }
             }
@@ -197,6 +284,18 @@ impl Instrument {
         return Err(UsbtmcError::Exception);
     }
 
+    #[cfg(feature = "libusbk")]
+    fn open_device(&self) -> UsbtmcResult<(Device, DeviceHandle)> {
+        use libusbk::DeviceList;
+
+        let device_list = DeviceList::new()?;
+        let device = device_list.find_with_vid_and_pid(self.vid as i32, self.pid as i32)?;
+
+        let device_handle = device.open()?;
+        Ok((device, device_handle))
+    }
+
+    #[cfg(feature = "rusb")]
     fn find_endpoint(
         &mut self,
         device: &mut Device<Context>,
@@ -231,6 +330,35 @@ impl Instrument {
         None
     }
 
+    #[cfg(feature = "rusb")]
+    pub fn print_endpoints(
+        &mut self,
+        device: &mut Device<Context>,
+        device_desc: &DeviceDescriptor,
+    ) {
+        let mut endpoints = vec![];
+        for index in 0..device_desc.num_configurations() {
+            let config_desc = match device.config_descriptor(index) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            for interface in config_desc.interfaces() {
+                for interface_desc in interface.descriptors() {
+                    for endpoint_desc in interface_desc.endpoint_descriptors() {
+                        endpoints.push(Endpoint {
+                            config: config_desc.number(),
+                            iface: interface_desc.interface_number(),
+                            setting: interface_desc.setting_number(),
+                            address: endpoint_desc.address(),
+                        });
+                    }
+                }
+            }
+        }
+        println!("Endpoints: {:#?}", endpoints);
+    }
+
+    #[cfg(feature = "rusb")]
     fn write_data(&mut self, data: &[u8], command: bool) -> UsbtmcResult<()> {
         let offset: usize = 0;
         let mut eom: bool = false;
@@ -266,14 +394,14 @@ impl Instrument {
                     req.append(&mut b);
                     req.append(&mut vec![0x00; (4 - (size % 4)) % 4]);
 
-                    handle.write_bulk(endpoint.address, &req, self.timeout)?;
+                    dbg!(handle.write_bulk(endpoint.address, &req, self.timeout))?;
 
                     num = num - size;
                 }
 
                 if command {
                     let send = self.pack_dev_dep_msg_in_header(self.max_transfer_size as usize, 0);
-                    handle.write_bulk(endpoint.address, &send, self.timeout)?;
+                    dbg!(handle.write_bulk(endpoint.address, &send, self.timeout))?;
                 }
 
                 if has_kernel_driver {
@@ -282,6 +410,39 @@ impl Instrument {
             }
 
             None => return Err(UsbtmcError::BulkOut),
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "libusbk")]
+    fn write_data(&mut self, data: &[u8], command: bool) -> UsbtmcResult<()> {
+        let offset: usize = 0;
+        let mut eom: bool = false;
+        let mut num: usize = data.len();
+
+        let (_device, mut device_handle) = self.open_device()?;
+        while num > 0 {
+            if num <= self.max_transfer_size as usize {
+                eom = true;
+            }
+
+            let block = &data[offset..(num - offset)];
+            let size: usize = block.len();
+
+            let mut req = self.pack_dev_dep_msg_out_header(size, eom);
+            let mut b: Vec<u8> = block.iter().cloned().collect();
+            req.append(&mut b);
+            req.append(&mut vec![0x00; (4 - (size % 4)) % 4]);
+
+            device_handle.write_pipe(self.write_pipe_id as u8, &req)?;
+
+            num = num - size;
+        }
+
+        if command {
+            let send = self.pack_dev_dep_msg_in_header(self.max_transfer_size as usize, 0);
+            device_handle.write_pipe(self.write_pipe_id as u8, &send)?;
         }
 
         Ok(())
