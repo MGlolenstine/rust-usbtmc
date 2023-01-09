@@ -109,6 +109,10 @@ impl Instrument {
                     .take_while(|c| **c != b'\n' && **c != b'\r')
                     .count();
 
+                if line_size <= 12 {
+                    return Ok(String::new());
+                }
+
                 let result = str::from_utf8(&buf[12..line_size]).unwrap().to_string();
 
                 if has_kernel_driver {
