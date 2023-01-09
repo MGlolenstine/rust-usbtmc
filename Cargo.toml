@@ -20,7 +20,6 @@ libusbk = { version = "0.1.2", features = ["vendored"], optional = true }
 byteorder = "1.4"
 
 [features]
-# default = ["rusb"]
-default = ["libusbk"]
+default = ["rusb"]
 rusb = ["dep:rusb"]
 libusbk = ["dep:libusbk"]
