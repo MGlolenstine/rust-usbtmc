@@ -11,6 +11,7 @@ use std::str;
 
 const USBTMC_MSGID_DEV_DEP_MSG_OUT: u8 = 1;
 const USBTMC_MSGID_DEV_DEP_MSG_IN: u8 = 2;
+const NUMBER_OF_HEADER_BYTES: usize = 12;
 
 #[derive(Debug)]
 pub struct Endpoint {
@@ -49,9 +50,7 @@ impl Instrument {
         }
     }
 
-    ///
-    ///
-    ///
+    /// Create a new Instrument with speciifed VID, PID, Bus and Address.
     pub fn new_filtered(vid: u16, pid: u16, bus: u8, address: u8) -> Instrument {
         Instrument {
             vid,
@@ -106,14 +105,11 @@ impl Instrument {
 
                 let line_size = buf
                     .iter()
+                    .skip(NUMBER_OF_HEADER_BYTES)
                     .take_while(|c| **c != b'\n' && **c != b'\r')
                     .count();
 
-                if line_size <= 12 {
-                    return Ok(String::new());
-                }
-
-                let result = str::from_utf8(&buf[12..line_size]).unwrap().to_string();
+                let result = str::from_utf8(&buf[NUMBER_OF_HEADER_BYTES..line_size + NUMBER_OF_HEADER_BYTES]).unwrap().to_string();
 
                 if has_kernel_driver {
                     handle.attach_kernel_driver(endpoint.iface).ok();
