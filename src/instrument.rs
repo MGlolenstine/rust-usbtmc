@@ -145,10 +145,11 @@ impl Instrument {
 
         let line_size = buf
             .iter()
+            .skip(NUMBER_OF_HEADER_BYTES)
             .take_while(|c| **c != b'\n' && **c != b'\r')
             .count();
 
-        let result = str::from_utf8(&buf[12..line_size]).unwrap().to_string();
+        let result = str::from_utf8(&buf[NUMBER_OF_HEADER_BYTES..line_size + NUMBER_OF_HEADER_BYTES]).unwrap().to_string();
 
         Ok(result)
     }
